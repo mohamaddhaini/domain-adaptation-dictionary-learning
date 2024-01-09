@@ -259,27 +259,6 @@ def main(args):
                 test_loss=reg_result
               print(f'Epoch {iter_num}/{n_iter} ({int((iter_num/n_iter)*100)}%) Test Result is  {reg_result:.4f}, best is {test_loss:.4f}',flush=True)
 
-    ##### Extract Source and target dictionaries of the dataset at the end of the training 
-    iter_source = iter(dset_loaders["train"])
-    iter_target = iter(dset_loaders["val"])
-    source_features=[]
-    for i in range(len_source):
-      source_x, source_y = next(iter_source)
-      source_x = source_x.to(device)
-      h_s = feature_extractor(source_x).view(source_x.shape[0], -1).detach()
-      source_features.append(h_s)
-    source_features = torch.cat(source_features)
-    target_features=[]
-    for i in range(len_target):
-      target_x, _ =next(iter_target)
-      target_x = target_x.to(device)
-      h_t = feature_extractor(target_x).view(target_x.shape[0], -1)
-      target_features.append(h_t)
-    target_features = torch.cat(target_features)
-    # M_source,_,_,_  = dl_loss.dictionary_learning(50,source_features.t(),rank=18,lambda_sp=0.9,lambda_reg=1,lamda = 0.1)
-    # M_target,_,_,_  = dl_loss.dictionary_learning(50,target_features.t(),rank=18,lambda_sp=0.9,lambda_reg=1,lamda = 0.1)
-    _,delta = dl_loss.match_dl(source_features,target_features,args.rank,args.alpha,args.sp1,args.sp2)
-
     print(f' Best Result rsd {args.rsd} src {args.src} tgt {args.tgt} lr {args.lr:.4f} seed {args.seed} rsd {args.rsd} batch size {args.batch_size:04d} is {test_loss:.4f}')
     print(f'Elapsed time is {((time.time()-tim)/3600):.4f} hours')
     key1=str(datetime.date.today())
@@ -291,12 +270,10 @@ def main(args):
     except:
       df = {}
     try:
-      df[key1][key2]={'src':args.src,'tgt':args.tgt,'batch-size':args.batch_size,'best-score':test_loss,'rsd':args.rsd,'seed':args.seed,\
-          'delta':delta}
+      df[key1][key2]={'src':args.src,'tgt':args.tgt,'batch-size':args.batch_size,'best-score':test_loss,'rsd':args.rsd,'seed':args.seed}
     except:
       df[key1]={}
-      df[key1][key2]={'src':args.src,'tgt':args.tgt,'batch-size':args.batch_size,'best-score':test_loss,'rsd':args.rsd,'seed':args.seed,\
-              'delta':delta}
+      df[key1][key2]={'src':args.src,'tgt':args.tgt,'batch-size':args.batch_size,'best-score':test_loss,'rsd':args.rsd,'seed':args.seed}
     save=False
     while (save==False):
       try:

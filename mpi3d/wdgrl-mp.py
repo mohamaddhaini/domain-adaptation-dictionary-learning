@@ -7,6 +7,7 @@ import datetime
 
 import argparse
 import torch
+import dl_loss
 from torch import nn
 from torch.autograd import grad
 from torch.utils.data import DataLoader
@@ -83,12 +84,6 @@ def load_data(root_path, domain, batch_size, phase,shuffle):
     # data.targets = F.one_hot(data.targets)
     data_loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=shuffle, drop_last=True, num_workers=0)
     return data_loader
-
-def riemannian_distance(Feature_s, Feature_t):
-  u_s, s_s, v_s = torch.svd(Feature_s.t())
-  u_t, s_t, v_t = torch.svd(Feature_t.t())
-  p_s, cospa, p_t = torch.svd(torch.mm(u_s.t(), u_t))
-  return torch.norm(torch.log10(cospa))
 
 def RSD(Feature_s, Feature_t):
     u_s, s_s, v_s = torch.svd(Feature_s.t())
@@ -252,74 +247,15 @@ def main(args):
             source_y  = torch.cat((labels1,labels2),dim=1)
             source_y  = source_y .float().to(device)/39
 
-            if args.rsd==0:
-              # >>>>>>>>>Train critic<<<<<<<<<
-              set_requires_grad(feature_extractor, requires_grad=False)
-              set_requires_grad(critic, requires_grad=True)
-              with torch.no_grad():
-                h_s =  feature_extractor(source_x).data.view(source_x.shape[0], -1)
-                h_t = feature_extractor(target_x).data.view(target_x.shape[0], -1)
-              disc_loss=0.0
-              for _ in range(args.k_critic):
-                  critic_optim.zero_grad()
-                  gp = gradient_penalty(critic, h_s, h_t)
-                  critic_s = critic(h_s)
-                  critic_t = critic(h_t)
-                  wasserstein_distance = critic_s.mean() - critic_t.mean()
-                  riemannian1 = torch.mean(torch.norm(torch.norm(torch.norm(source_x-target_x,dim=1),dim=1),dim=1) - torch.norm(h_s-h_t,dim=1))
-                  riemannian2 = torch.mean(torch.norm(h_s-h_t,dim=1) - torch.norm(source_y +discriminator(h_t)))
-                  critic_cost = args.lambda_critic*(-(wasserstein_distance)+ args.gamma*gp)
-                  critic_cost.backward()
-                  # print(critic[0].weight.grad)
-                  critic_optim.step()
-                  total_loss += critic_cost.item()
-                  disc_loss+=(wasserstein_distance).item()
-
-              # >>>>> Weight Clipping <<<<<<
-              # for p in critic.parameters():
-              #   p.data.clamp_(-0.01,0.01)
-              # >>>>>>>>>Train classifier<<<<<<<<<
-              set_requires_grad(feature_extractor, requires_grad=True)
-              set_requires_grad(critic, requires_grad=False)
-              gen_loss=0.0
-              for _ in range(args.k_clf):
-                  clf_optim.zero_grad()
-                  source_features = feature_extractor(source_x).view(source_x.shape[0], -1)
-                  target_features = feature_extractor(target_x).view(target_x.shape[0], -1)
-                  source_preds = discriminator(source_features)
-                  clf_loss = clf_criterion(source_preds, source_y)
-                  wasserstein_distance = critic(source_features).mean() - critic(target_features).mean()
-                  # riemannian=torch.mean((torch.matmul(source_features,target_features.T)/(torch.norm(target_features)*torch.norm(source_features)))-(critic(source_features)-critic(target_features))**2)
-                  if args.manifold==1:
-                    riemannian1 = torch.mean(torch.norm(torch.norm(torch.norm(source_x-target_x,dim=1),dim=1),dim=1) - torch.norm(source_features-target_features,dim=1))
-                    riemannian2 = torch.mean(torch.norm(source_features-target_features,dim=1) - torch.norm(source_y-source_preds))
-                    loss = clf_loss + args.wd_clf*(wasserstein_distance+ args.coeff*(riemannian2+riemannian1))
-                  elif args.manifold==2:
-                    loss_transport,gamma=transport.optimal_trans(source_x,target_x,source_features,target_features,source_y,source_preds,args.abl_trial,regr=args.regr,nb_iter=args.nb_iter)
-                    loss = clf_loss + args.wd_clf*(wasserstein_distance) + args.coeff*(loss_transport)
-                    # print(gamma,flush=True)
-                  else:
-                    loss = clf_loss + args.wd_clf*(wasserstein_distance)
-                  
-                  loss.backward()
-                  # print(clf_model.feature_extractor.layer3[1].conv1.weight.grad)
-                  gen_loss+=loss.item()
-                  clf_optim.step()
-
-              generator_loss.append(gen_loss/args.k_clf)
-              discriminator_loss.append(disc_loss/args.k_critic)
-              reg_loss.append(clf_loss.item())
-            else:
-              clf_optim.zero_grad()
-              h_s = feature_extractor(source_x).view(source_x.shape[0], -1)
-              h_t = feature_extractor(target_x).view(target_x.shape[0], -1)
-              source_preds = discriminator(h_s)
-              clf_loss = clf_criterion(source_preds, source_y)
-              rsd_loss =  RSD (h_s,h_t)
-              loss = clf_loss + args.wd_clf*(rsd_loss)
-              loss.backward()
-              # print(clf_model.feature_extractor.layer3[1].conv1.weight.grad)
-              clf_optim.step()
+            clf_optim.zero_grad()
+            h_s = feature_extractor(source_x).view(source_x.shape[0], -1)
+            h_t = feature_extractor(target_x).view(target_x.shape[0], -1)
+            source_preds = discriminator(h_s)
+            clf_loss = clf_criterion(source_preds, source_y)
+            rsd_loss,_= dl_loss.match_dl(h_s,h_t,args.rank,args.alpha,args.sp1,args.sp2)
+            loss = clf_loss + args.wd_clf*(rsd_loss)
+            loss.backward()
+            clf_optim.step()
 
 
             # Evaluate
@@ -329,21 +265,8 @@ def main(args):
               if reg_result<test_loss:
                 test_loss=reg_result
               print(f'Epoch {iter_num}/{n_iter} ({int((iter_num/n_iter)*100)}%) Test Result is  {reg_result:.4f}, best is {test_loss:.4f}',flush=True)
-            #   if args.manifold==2:
-            #     fig=plt.figure()
-            #     plt.imshow(gamma.cpu().detach().numpy())
-            #     plt.savefig(r'/content/drive/MyDrive/Mohamad/GANS/pytorch-domain-adaptation/saved data/ot-gamma.png', bbox_inches='tight')
-            #     plt.close(fig)
-            # os.makedirs(os.path.join(r'/content/drive/MyDrive/Mohamad/GANS/pytorch-domain-adaptation/saved data','trial_'+str(args.trial)), exist_ok=True)
-            # np.save(os.path.join(r'/content/drive/MyDrive/Mohamad/GANS/pytorch-domain-adaptation/saved data','trial_'+str(args.trial)+'/gen_loss.npy'),generator_loss)
-            # np.save(os.path.join(r'/content/drive/MyDrive/Mohamad/GANS/pytorch-domain-adaptation/saved data','trial_'+str(args.trial)+'/disc_loss.npy'),discriminator_loss)
-            # np.save(os.path.join(r'/content/drive/MyDrive/Mohamad/GANS/pytorch-domain-adaptation/saved data','trial_'+str(args.trial)+'/reg_loss.npy'),reg_loss)
-
-
-        
-        # os.chdir(r'/content/drive/MyDrive/Mohamad/GANS/pytorch-domain-adaptation')
         mean_loss = total_loss / (args.iterations * args.k_critic)
-    print(f' Best Result rsd {args.rsd} src {args.src} tgt {args.tgt} lr {args.lr:.4f} manifold {args.manifold:02d} regr sinkhorn {args.regr:.4f} coeff {args.coeff:.4f} batch size {args.batch_size:04d} is {test_loss:.4f}')
+    print(f' Best Result  src {args.src} tgt {args.tgt} lr {args.lr:.4f} manifold {args.manifold:02d} coeff {args.coeff:.4f} batch size {args.batch_size:04d} is {test_loss:.4f}')
     print(f'Elapsed time is {((time.time()-tim)/3600):.4f} hours')
     key1=str(datetime.date.today())
     key2 = str(datetime.datetime.now().time())
@@ -354,10 +277,10 @@ def main(args):
     except:
       df = {}
     try:
-      df[key1][key2]={'src':args.src,'tgt':args.tgt,'manifold':args.manifold,'regr-sinkhorn':args.regr,'coeff':args.coeff,'batch-size':args.batch_size,'best-score':test_loss}
+      df[key1][key2]={'src':args.src,'tgt':args.tgt,'manifold':args.manifold,'coeff':args.coeff,'batch-size':args.batch_size,'best-score':test_loss}
     except:
       df[key1]={}
-      df[key1][key2]={'src':args.src,'tgt':args.tgt,'manifold':args.manifold,'regr-sinkhorn':args.regr,'coeff':args.coeff,'batch-size':args.batch_size,'best-score':test_loss}
+      df[key1][key2]={'src':args.src,'tgt':args.tgt,'manifold':args.manifold,'coeff':args.coeff,'batch-size':args.batch_size,'best-score':test_loss}
     save=False
     while (save==False):
       try:
